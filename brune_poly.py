@@ -74,10 +74,16 @@ def brune_extraction(num, denom):
     l2 = 1 / (yc * w0)
     l3 = -l1 * l2 / (l1 + l2)
 
-    final_num = new_num - Polynomial([0, l3])
+    final_num = new_num - new_denom*Polynomial([0, l3])
 
+    assert final_num.degree() == new_denom.degree()
     return (r, l1, c2, l2, l3), final_num, new_denom
 
+def brune_stage(s, params, next_z):
+    r, l1, c2, l2, l3 = params
+    def par(x, y):
+        return 1/(1/x + 1/y)
+    return r + s*l1 + par(s*l2 + 1/(s*c2), s*l3 + next_z)
 
 if __name__ == '__main__':
     import vectfit
@@ -87,15 +93,16 @@ if __name__ == '__main__':
     residues = [14 + 3j, 14 - 3j, 7 + 1j, 7 - 1j]
     offset = 0.5
     w = np.linspace(1, 700, 1000)
-    #s = 1j*w
-    #z = vectfit.model(s, poles, residues, offset, 0)
+    s = 1j*w
+    z = vectfit.model(s, poles, residues, offset, 0)
     num, denom = poles_to_rational_rep(poles, residues, offset, 0)
     print num, denom
-    #plt.plot(w, z.real)
-    #plt.plot(w, (num(s)/denom(s)).real)
-    #r_num, r_denom = get_real_polynomial(num, denom)
-    #print get_polynomial_minimum(r_num, r_denom)
-    #plt.plot(w, r_num(w)/r_denom(w))
-    #plt.yscale('log')
-    #plt.show()
-    print brune_extraction(num, denom)
+    plt.plot(w, z.real)
+    plt.plot(w, (num(s)/denom(s)).real)
+    r_num, r_denom = get_real_polynomial(num, denom)
+    plt.plot(w, r_num(w)/r_denom(w))
+    plt.yscale('log')
+    params, new_num, new_denom = brune_extraction(num, denom)
+    brune_z = brune_stage(s, params, new_num(s)/new_denom(s))
+    plt.plot(w, brune_z.real)
+    plt.show()
