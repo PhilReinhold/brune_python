@@ -76,14 +76,34 @@ def brune_extraction(num, denom):
 
     final_num = new_num - new_denom*Polynomial([0, l3])
 
+    # TODO: calculate final_num in more numerically stable way
+    if final_num.degree() == new_denom.degree() + 1:
+        if final_num.coef[-1] / final_num.coef[-2] < 1e-10:
+            final_num = Polynomial(final_num.coef[:-1])
+
     assert final_num.degree() == new_denom.degree()
     return (r, l1, c2, l2, l3), final_num, new_denom
+
+def vectfit_to_brune(poles, residues, d, h):
+    num, denom = poles_to_rational_rep(poles, residues, d, h)
+    stages = []
+    for _ in range(num.degree() / 2):
+        params, num, denom = brune_extraction(num, denom)
+        stages.append(params)
+    assert num.degree() == denom.degree() == 0
+    return stages, (num / denom).coef[0]
 
 def brune_stage(s, params, next_z):
     r, l1, c2, l2, l3 = params
     def par(x, y):
         return 1/(1/x + 1/y)
     return r + s*l1 + par(s*l2 + 1/(s*c2), s*l3 + next_z)
+
+def compose_brune_stages(s, stages, rf):
+    z = rf
+    for params in reversed(stages):
+        z = brune_stage(s, params, z)
+    return z
 
 if __name__ == '__main__':
     import vectfit
@@ -96,7 +116,6 @@ if __name__ == '__main__':
     s = 1j*w
     z = vectfit.model(s, poles, residues, offset, 0)
     num, denom = poles_to_rational_rep(poles, residues, offset, 0)
-    print num, denom
     plt.plot(w, z.real)
     plt.plot(w, (num(s)/denom(s)).real)
     r_num, r_denom = get_real_polynomial(num, denom)
@@ -105,4 +124,7 @@ if __name__ == '__main__':
     params, new_num, new_denom = brune_extraction(num, denom)
     brune_z = brune_stage(s, params, new_num(s)/new_denom(s))
     plt.plot(w, brune_z.real)
+    stages, zf = vectfit_to_brune(poles, residues, offset, 0)
+    full_brune_z = compose_brune_stages(s, stages, zf)
+    plt.plot(w, full_brune_z.real)
     plt.show()
