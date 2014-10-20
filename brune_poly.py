@@ -1,138 +1,101 @@
+"""
+brune.py -- Implementation of Brune network synthesis algorithm
+"""
+import matplotlib
+matplotlib.use('TKAgg')
 import operator
-from numpy import linspace, array, argmin
-from numpy.polynomial.polynomial import Polynomial, polydiv, polymul, polysub
-from scipy.optimize import fmin
-from sympy import symbols, poly
-from vectfit import vectfit_auto
+import numpy as np
+from numpy.polynomial.polynomial import Polynomial
 
-def threshold_arr(arr, threshold=1e-4):
-    arr = array(arr)
-    abs_arr = abs(arr)
-    abs_thresh = threshold * max(abs_arr)
-    ret = arr.copy()
-    ret[abs_arr < abs_thresh] = 0.0
-    return ret
+def product(xs):
+    return reduce(operator.mul, xs, 1)
 
-def get_rational_rep(y, s, n_poles, threshold=1e-4):
-    poles, residues, d, h = vectfit_auto(y, s, n_poles=n_poles, show=True)
-    x = symbols('x')
-    denominator = reduce(operator.mul, [x-p for j, p in enumerate(poles)])
-    numerator = 0
-    for i, r in enumerate(residues):
-        term = r
-        for j, p in enumerate(poles):
-            if i != j:
-                term *= x - p
-        numerator += term
+def poles_to_rational_rep(poles, residues, d, h):
+    """
+    Take the parameters produced by vectfit and construct a representation
+    of the form f(s) / g(s), returning f and g
+    """
+    pole_ps = [Polynomial([-p, 1]) for p in poles]
+    denom = product(pole_ps)
+    num = sum(r * denom / p for r, p in zip(residues, pole_ps))
+    num += Polynomial([d, h]) * denom
+    # Since we're a PR function, should be safe to convert these to real values
+    num = Polynomial(num.coef.real)
+    denom = Polynomial(denom.coef.real)
+    return num, denom
 
-    numerator += d*denominator + h*x*denominator
+def get_real_polynomial(num, denom):
+    """get a rational representation of Re[z(iw)]"""
+    # 1.A.i: Write num(s) as num_w(w) == num(iw), similarly for denom
+    N = num.degree() + 1
+    num_w_coefs = np.array([1j**n for n in range(N)])*num.coef
+    denom_w_coefs = np.array([1j**n for n in range(N)])*denom.coef
 
-    num_coefs = threshold_arr(map(complex,poly(numerator, x).all_coeffs()), threshold)
-    denom_coefs = threshold_arr(map(complex,poly(denominator, x).all_coeffs()), threshold)
+    # 1.A.ii: write Re[z[(iw)]] as
+    # (Re[num]Re[denom] + Im[num]Im[denom])/(Re[denom]**2 + Im[denom]**2)
+    re_num_w, im_num_w = map(Polynomial, (num_w_coefs.real, num_w_coefs.imag))
+    re_denom_w, im_denom_w = map(Polynomial, (denom_w_coefs.real, denom_w_coefs.imag))
+    re_z_w_num = re_num_w*re_denom_w + im_num_w*im_denom_w
+    re_z_w_denom = re_denom_w**2 + im_denom_w**2
+    return re_z_w_num, re_z_w_denom
 
-    numerator = Polynomial(list(reversed(num_coefs)))
-    denominator = Polynomial(list(reversed(denom_coefs)))
-    print numerator
-    print '-'*30
-    print denominator
-    print numerator.degree(), denominator.degree()
-    return numerator, denominator
-
-def get_local_minima(num, denom):
-    z = lambda x: num(x)/denom(x)
+def get_polynomial_minimum(num, denom):
     d_num = num.deriv()
     d_denom = denom.deriv()
-    dzdx_num = polysub(polymul(d_num, denom) - polymul(num, d_denom))
-    roots = dzdx_num.roots()
-    local_minima = [z(x) for x in roots]
-    min_i = argmin(local_minima)
-    min_z = local_minima[min_i]
-    if z(0) < min_z:
-        return 0
-    roots[argmin(local_minima)]
+    w_mins = (d_num*denom - num*d_denom).roots().real
+    p_w_mins = w_mins[w_mins > 0]
+    i0 = np.argmin(num(p_w_mins) / denom(p_w_mins))
+    return p_w_mins[i0]
 
-def test_get_rational_rep():
-    from matplotlib import pyplot as plt
-    f = linspace(0, 10, 501)[1:]
-    s = 1j*f
-    y = sum([1/(r + 1j*zc*(f/f0 - f0/f)) for r, zc, f0 in [(.2, 10, 3), (.5, 17, 6)]])
-    plt.figure(0)
-    numerator, denominator = get_rational_rep(y, s, 2)
-    n1 = polymul(numerator.coef, [0, 1])
-    print polydiv(denominator.coef, n1)
-    y2 = numerator(s) / denominator(s)
+def brune_extraction(num, denom):
+    assert num.degree() == denom.degree()
+    # Identify s at which re[z(iw)] is minimized
+    re_z_w_num, re_z_w_denom = get_real_polynomial(num, denom)
+    w0 = get_polynomial_minimum(re_z_w_num, re_z_w_denom)
+    s0 = 1j*w0
+    z0 = num(s0) / denom(s0)
 
-    plt.figure(1)
-    plt.plot(f, y.imag)
-    plt.plot(f, y2.imag)
-    plt.figure(2)
-    plt.plot(f, y.real)
-    plt.plot(f, y2.real)
-    plt.show()
+    # Extract resistor and inductor, producing lossless pole
+    r = z0.real
+    l1 = z0.imag / w0
+    num -= denom * Polynomial([r, l1])
 
-def single_step_polydiv(a, b):
-    'a should be of larger degree than b'
-    b2 = polymul(b, [0, 1])
-    r, new_a2 = polydiv(a, b2)
-    new_a = polymul(new_a2, [0, 1])
-    return r, new_a
+    # Remove the resulting zero
+    zero_p = Polynomial([w0**2, 0, 1])
+    new_num = num / zero_p
+    s_new_num = Polynomial([0, 1])*new_num
+    s_new_num_r = s_new_num % zero_p
+    denom_r = denom % zero_p
+    res = denom_r / s_new_num_r
+    new_denom = (denom - res*s_new_num) / zero_p
 
-def reduce_order(num, denom, s):
-    if num.degree() > denom.degree():
-        # pole at infinity
-        r, new_num = single_step_polydiv(num.coef, denom.coef)
-        return ('Pole', 'Inf', r), Polynomial(new_num), denom
+    yc = res.coef[0] / w0
+    c2 = yc / w0
+    l2 = 1 / (yc * w0)
+    l3 = -l1 * l2 / (l1 + l2)
 
-    if denom.degree() > num.degree():
-        # zero at infinity
-        r, new_denom = single_step_polydiv(denom.coef, num.coef)
-        return ('Zero', 'Inf', r), num, Polynomial(new_denom)
+    final_num = new_num - Polynomial([0, l3])
 
-    if denom.coef[0] == 0:
-        # pole at zero
-        num_inverse = list(reversed(num.coef))
-        denom_inverse = list(reversed(num.coef))
-        r, new_num_inverse = single_step_polydiv(num_inverse, denom_inverse)
-        new_num = list(reversed(new_num_inverse))
-        return ('Pole', 'Zero', r), Polynomial(new_num), denom
-
-    if num.coef[0] == 0:
-        # zero at zero
-        num_inverse = list(reversed(num.coef))
-        denom_inverse = list(reversed(num.coef))
-        r, new_denom_inverse = single_step_polydiv(denom_inverse, num_inverse)
-        new_denom = list(reversed(new_denom_inverse))
-        return ('Zero', 'Zero', r), num, Polynomial(new_denom)
-
-
-    z = lambda x: num(x)/denom(x)
-    s1 = get_min(num, denom)
-    w1 = s1.imag
-    z1 = z(s1)
-    r = z1.real
-    l1 = z1.imag / w1
-    # Remove the resulting zero at w1
-    np = polysub(num.coef, polymul(denom.coef, [r, 1j*l1]))
-    err_k = lambda k: polydiv(denom - polymul([0, 2*k], np))[0]
-    fmin()
-
-
-    dnum = num.deriv()
-    ddenom = denom.deriv()
-    dzds = lambda x: (dnum(x)*denom(x) - num(x)*ddenom(x))/(denom(x)**2)
-    min_idx = argmin(z(s))
-    s1 = s[min_idx]
-    w1 = s1.imag
-    z1 = z(s1)
-    r = z1.real
-    l1 = z1.imag / w1
-    zc = w1 * dzds(s1).imag / 2.
-    l2 = zc / w1
-    c2 = 1 / (zc * w1)
-    l3 = -l1*l2 / (l1+l2)
-    return ('Brune', r, l1, l2, c2, l3),
-
+    return (r, l1, c2, l2, l3), final_num, new_denom
 
 
 if __name__ == '__main__':
-    test_get_rational_rep()
+    import vectfit
+    import matplotlib.pyplot as plt
+
+    poles = [-1 + 100j, -1 - 100j, -2 + 500j, -2 - 500j]
+    residues = [14 + 3j, 14 - 3j, 7 + 1j, 7 - 1j]
+    offset = 0.5
+    w = np.linspace(1, 700, 1000)
+    #s = 1j*w
+    #z = vectfit.model(s, poles, residues, offset, 0)
+    num, denom = poles_to_rational_rep(poles, residues, offset, 0)
+    print num, denom
+    #plt.plot(w, z.real)
+    #plt.plot(w, (num(s)/denom(s)).real)
+    #r_num, r_denom = get_real_polynomial(num, denom)
+    #print get_polynomial_minimum(r_num, r_denom)
+    #plt.plot(w, r_num(w)/r_denom(w))
+    #plt.yscale('log')
+    #plt.show()
+    print brune_extraction(num, denom)
